@@ -41,8 +41,6 @@ struct AVPacket;
 struct AVRational;
 struct AVCodecContext;
 
-#define AVCODEC_MAX_AUDIO_FRAME_SIZE 192000
-
 namespace caspar {
 
 namespace core {

@@ -49,6 +49,7 @@
 #include <boost/crc.hpp>
 #pragma warning(pop)
 
+#include <tbb/tbb.h>
 #include <tbb/cache_aligned_allocator.h>
 #include <tbb/parallel_invoke.h>
 
@@ -60,7 +61,9 @@
 namespace caspar {
 	namespace ffmpeg {
 
-		AVFormatContext * alloc_output_format_context(const std::string filename, AVOutputFormat * output_format)
+		using namespace std;
+
+		AVFormatContext * alloc_output_format_context(const string filename, AVOutputFormat * output_format)
 		{
 			AVFormatContext * ctx = nullptr;
 			if (avformat_alloc_output_context2(&ctx, output_format, NULL, filename.c_str()) >= 0)
@@ -69,18 +72,18 @@ namespace caspar {
 				return nullptr;
 		}
 
-		int crc16(const std::string& str)
+		int crc16(const string& str)
 		{
 			boost::crc_16_type result;
 			result.process_bytes(str.data(), str.length());
 			return result.checksum();
 		}
 
-		static const std::string			MXF = ".MXF";
+		static const string			MXF = ".MXF";
 
 		struct output_format
 		{
-			const std::string							file_name;
+			const string								file_name;
 			AVCodec *									video_codec;
 			AVCodec *									audio_codec;
 			AVOutputFormat*								format;
@@ -88,15 +91,15 @@ namespace caspar {
 			const bool									is_widescreen;
 			const int64_t								audio_bitrate;
 			const int64_t								video_bitrate;
-			const std::string							file_timecode;
+			const string								file_timecode;
 
 
-			output_format(const std::string& filename, AVCodec * acodec, AVCodec * vcodec, const bool is_stream, const bool is_wide, const int64_t a_rate, const int64_t v_rate, const std::string& file_tc)
+			output_format(const string& filename, AVCodec * acodec, AVCodec * vcodec, const bool is_stream, const bool is_wide, const int64_t a_rate, const int64_t v_rate, const string& file_tc)
 				: format(av_guess_format(NULL, filename.c_str(), NULL))
 				, video_codec(vcodec)
 				, audio_codec(acodec)
 				, is_widescreen(is_wide)
-				, is_mxf(std::equal(MXF.rbegin(), MXF.rend(), boost::to_upper_copy(filename).rbegin()))
+				, is_mxf(equal(MXF.rbegin(), MXF.rend(), boost::to_upper_copy(filename).rbegin()))
 				, audio_bitrate(a_rate)
 				, video_bitrate(v_rate)
 				, file_name(filename)
@@ -121,46 +124,53 @@ namespace caspar {
 			}
 		};
 
-		AVDictionary * read_parameters(std::string options) {
+		AVDictionary * read_parameters(string options) {
 			AVDictionary* result = NULL;
 			LOG_ON_ERROR2(av_dict_parse_string(&result, options.c_str(), "=", ",", 0), L"Parameters unrecognized");
 			return result;
 		}
 
-		typedef std::vector<uint8_t, tbb::cache_aligned_allocator<uint8_t>>	byte_vector;
+
+		typedef vector<uint8_t, tbb::cache_aligned_allocator<uint8_t>>	byte_vector;
+		
 		
 		struct ffmpeg_consumer : boost::noncopyable
 		{
-			const std::string						filename_;
-			AVDictionary *							options_;
-			output_format							output_format_;
-			const core::video_format_desc			format_desc_;
+			const string														filename_;
+			AVDictionary *														options_;
+			output_format														output_format_;
+			const core::video_format_desc										format_desc_;
 
-			const safe_ptr<diagnostics::graph>		graph_;
+			const safe_ptr<diagnostics::graph>									graph_;
 
-			executor								encode_executor_;
+			executor															encode_executor_;
 
-			std::unique_ptr<AVFormatContext, std::function<void(AVFormatContext *)>>	format_context_;
-			std::unique_ptr<AVStream, std::function<void(AVStream  *)>>					audio_st_;
-			std::unique_ptr<AVStream, std::function<void(AVStream  *)>>					video_st_;
+			unique_ptr<AVFormatContext, function<void(AVFormatContext *)>>		format_context_;
+			unique_ptr<AVStream, function<void(AVStream  *)>>					audio_st_;
+			unique_ptr<AVStream, function<void(AVStream  *)>>					video_st_;
 
-			std::unique_ptr<SwrContext, std::function<void(SwrContext *)>>				swr_;
-			std::unique_ptr<SwsContext, std::function<void(SwsContext *)>>				sws_;
+			unique_ptr<SwrContext, function<void(SwrContext *)>>				swr_;
+			
+			vector<unique_ptr<SwsContext, function<void(SwsContext *)>>>		sws_;
+			const size_t														num_scalers_;
+			const size_t														scale_slice_height_;
 
-			byte_vector								audio_bufers_[AV_NUM_DATA_POINTERS];
-			byte_vector								key_picture_buf_;
-			byte_vector								picture_buf_;
+			byte_vector															audio_bufers_[AV_NUM_DATA_POINTERS];
+			byte_vector															key_picture_buf_;
+			byte_vector															picture_buf_;
 
-			tbb::atomic<int64_t>					out_frame_number_;
-			int64_t									out_audio_sample_number_;
+			tbb::atomic<int64_t>												out_frame_number_;
+			int64_t																out_audio_sample_number_;
 
-			bool									key_only_;
-			bool									audio_is_planar;
-			tbb::atomic<int64_t>					current_encoding_delay_;
-			boost::timer							frame_timer_;
+			bool																key_only_;
+			bool																audio_is_planar;
+			tbb::atomic<int64_t>												current_encoding_delay_;
+			boost::timer														frame_timer_;
+			boost::timer														video_convert_timer_;
+			boost::timer														video_encode_timer_;
 
 		public:
-			ffmpeg_consumer(const std::string& filename, const core::video_format_desc& format_desc, bool key_only, output_format format, const std::string options)
+			ffmpeg_consumer(const string& filename, const core::video_format_desc& format_desc, bool key_only, const output_format& format, const string options)
 				: filename_(filename)
 				, format_desc_(format_desc)
 				, encode_executor_(print())
@@ -168,6 +178,8 @@ namespace caspar {
 				, output_format_(format)
 				, key_only_(key_only)
 				, options_(read_parameters(options))
+				, num_scalers_(4)
+				, scale_slice_height_(format_desc.height / num_scalers_)
 			{
 				current_encoding_delay_ = 0;
 				out_frame_number_ = 0;
@@ -178,15 +190,18 @@ namespace caspar {
 				}
 				catch (...) {}
 				graph_->set_color("frame-time", diagnostics::color(0.1f, 1.0f, 0.1f));
-				graph_->set_color("dropped-frame", diagnostics::color(1.0f, 0.1f, 0.1f));
+				graph_->set_color("dropped-frame", diagnostics::color(1.0f, 0.0f, 0.0f));
+				graph_->set_color("video-encode", diagnostics::color(0.5f, 0.0f, 1.0f));
+				graph_->set_color("video-convert", diagnostics::color(0.0f, 0.5f, 1.0f));
 				graph_->set_text(print());
 				diagnostics::register_graph(graph_);
 
+				encode_executor_.set_priority_class(high_priority_class);
 				encode_executor_.set_capacity(8);
 
 				try
 				{
-					format_context_ = std::unique_ptr<AVFormatContext, std::function<void(AVFormatContext *)>>(alloc_output_format_context(filename_, output_format_.format) , ([](AVFormatContext * ctx)
+					format_context_ = unique_ptr<AVFormatContext, function<void(AVFormatContext *)>>(alloc_output_format_context(filename_, output_format_.format) , ([](AVFormatContext * ctx)
 					{
 						if (!(ctx->oformat->flags & AVFMT_NOFILE))
 							LOG_ON_ERROR2(avio_close(ctx->pb), "[ffmpeg_consumer]"); // Close the output ffmpeg.
@@ -198,12 +213,12 @@ namespace caspar {
 
 					auto stream_deleter = [](AVStream * stream) {
 						avcodec_close(stream->codec);
-						delete stream;
+						avcodec_free_context(&stream->codec);
 					};
 
-					video_st_ = std::unique_ptr<AVStream, std::function<void(AVStream *)>>(add_video_stream(), stream_deleter);
+					video_st_ = unique_ptr<AVStream, function<void(AVStream *)>>(add_video_stream(), stream_deleter);
 					if (!key_only_)
-						audio_st_ = std::unique_ptr<AVStream, std::function<void(AVStream *)>>(add_audio_stream(), stream_deleter);
+						audio_st_ = unique_ptr<AVStream, function<void(AVStream *)>>(add_audio_stream(), stream_deleter);
 
 					av_dict_set(&video_st_->metadata, "timecode", output_format_.file_timecode.c_str(), AV_DICT_DONT_OVERWRITE);
 
@@ -217,7 +232,7 @@ namespace caspar {
 						&& av_dict_count(options_) > 0
 						&& av_dict_get_string(options_, &unused_options, '=', ',') >= 0)
 					{
-						CASPAR_LOG(warning) << print() << L" Unrecognized FFMpeg options: " << widen(std::string(unused_options));
+						CASPAR_LOG(warning) << print() << L" Unrecognized FFMpeg options: " << widen(string(unused_options));
 						if (unused_options)
 							delete(unused_options);
 						av_dict_free(&options_);
@@ -247,9 +262,9 @@ namespace caspar {
 				CASPAR_LOG(info) << print() << L" Successfully Uninitialized.";
 			}
 
-			std::wstring print() const
+			wstring print() const
 			{
-				return L"ffmpeg_consumer[" + widen(filename_) + L"]:" + boost::lexical_cast<std::wstring>(out_frame_number_);
+				return L"ffmpeg_consumer[" + widen(filename_) + L"]:" + boost::lexical_cast<wstring>(out_frame_number_);
 			}
 
 			AVStream* add_video_stream()
@@ -277,7 +292,7 @@ namespace caspar {
 				c->height = format_desc_.height;
 				c->gop_size = 25;
 				c->time_base = st->time_base;
-				c->flags |= format_desc_.field_mode == core::field_mode::progressive ? 0 : (CODEC_FLAG_INTERLACED_ME | CODEC_FLAG_INTERLACED_DCT);
+				c->flags |= format_desc_.field_mode == core::field_mode::progressive ? 0 : (AV_CODEC_FLAG_INTERLACED_ME | AV_CODEC_FLAG_INTERLACED_DCT);
 				if (c->pix_fmt == AV_PIX_FMT_NONE)
 					c->pix_fmt = AV_PIX_FMT_YUV420P;
 
@@ -314,7 +329,11 @@ namespace caspar {
 				{
 					c->pix_fmt = AV_PIX_FMT_YUV420P;
 					c->bit_rate = format_desc_.height * 14 * 1000; // about 8Mbps for SD, 14 for HD
-					LOG_ON_ERROR2(av_opt_set(c->priv_data, "preset", "veryfast", NULL), "[ffmpeg_consumer]");
+				}
+				else if (c->codec_id == AV_CODEC_ID_HEVC)
+				{
+					c->pix_fmt = AV_PIX_FMT_YUV420P;
+					c->bit_rate = format_desc_.height * 7 * 1000; // about 4Mbps for SD, 7 for HD
 				}
 				else if (c->codec_id == AV_CODEC_ID_QTRLE)
 				{
@@ -332,7 +351,7 @@ namespace caspar {
 						c->rc_min_rate = c->bit_rate;
 						c->rc_buffer_size = 2000000;
 						c->rc_initial_buffer_occupancy = 2000000;
-						c->rc_buffer_aggressivity = 0.25;
+						//c->rc_buffer_aggressivity = 0.25; //deprecated, use encoder private options instead
 						c->gop_size = 1;
 					}
 					else
@@ -361,7 +380,7 @@ namespace caspar {
 
 
 				if (output_format_.format->flags & AVFMT_GLOBALHEADER)
-					c->flags |= CODEC_FLAG_GLOBAL_HEADER;
+					c->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 				c->sample_aspect_ratio = sample_aspect_ratio;
 
 				if (tbb_avcodec_open(c, encoder, &options_, true) < 0)
@@ -418,7 +437,7 @@ namespace caspar {
 				}
 
 				if (output_format_.format->flags & AVFMT_GLOBALHEADER)
-					c->flags |= CODEC_FLAG_GLOBAL_HEADER;
+					c->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
 				if (output_format_.audio_bitrate != 0)
 					c->bit_rate = output_format_.audio_bitrate * 1024;
@@ -430,17 +449,22 @@ namespace caspar {
 				return st;
 			}
 
-			std::shared_ptr<AVFrame> convert_video(core::read_frame& frame, AVCodecContext* c)
+			shared_ptr<AVFrame> convert_video(core::read_frame& frame, AVCodecContext* c)
 			{
-				if (!sws_)
+				if (sws_.empty())
 				{
-					sws_ = std::unique_ptr<SwsContext, std::function<void(SwsContext *)>>(
-						sws_getContext(format_desc_.width, format_desc_.height, AV_PIX_FMT_BGRA, format_desc_.width, format_desc_.height, c->pix_fmt, 0, nullptr, nullptr, NULL),
-						[](SwsContext * ctx) { sws_freeContext(ctx); });
-					if (!sws_)
+					for (size_t i = 0; i < num_scalers_; i++)
+					{
+						sws_.push_back(unique_ptr<SwsContext, function<void(SwsContext *)>>(
+							sws_getContext(format_desc_.width, scale_slice_height_, AV_PIX_FMT_BGRA, c->width, scale_slice_height_, c->pix_fmt, SWS_POINT, nullptr, nullptr, NULL),
+							[](SwsContext * ctx) { 
+							sws_freeContext(ctx); 
+						}));
+					}
+					if (!sws_[0])
 						BOOST_THROW_EXCEPTION(caspar_exception() << msg_info("Cannot initialize the conversion context"));
 				}
-				std::unique_ptr<AVFrame, std::function<void(AVFrame *)>> in_frame(av_frame_alloc(), [](AVFrame *frame) { av_frame_free(&frame); });
+				unique_ptr<AVFrame, function<void(AVFrame *)>> in_frame(av_frame_alloc(), [](AVFrame *frame) { av_frame_free(&frame); });
 				auto in_picture = reinterpret_cast<AVPicture*>(in_frame.get());
 
 				if (key_only_)
@@ -455,15 +479,21 @@ namespace caspar {
 					avpicture_fill(in_picture, const_cast<uint8_t*>(frame.image_data().begin()), AV_PIX_FMT_BGRA, format_desc_.width, format_desc_.height);
 				}
 
-				std::shared_ptr<AVFrame> out_frame(av_frame_alloc(), [](AVFrame* frame) { av_frame_free(&frame); });
+				shared_ptr<AVFrame> out_frame(av_frame_alloc(), [](AVFrame* frame) { av_frame_free(&frame); });
 				bool is_imx50_pal = output_format_.is_mxf && format_desc_.format == core::video_format::pal;
 
 				av_image_fill_arrays(out_frame->data, out_frame->linesize, picture_buf_.data(), c->pix_fmt, c->width, c->height, 16);
-
-				uint8_t *out_data[AV_NUM_DATA_POINTERS];
-				for (uint32_t i = 0; i < AV_NUM_DATA_POINTERS; i++)
-					out_data[i] = reinterpret_cast<uint8_t*>( out_frame->data[i] + ((is_imx50_pal && out_frame->data[i]) ? 32 * out_frame->linesize[i] : 0));
-				sws_scale(sws_.get(), in_frame->data, in_frame->linesize, 0, format_desc_.height, out_data, out_frame->linesize);
+				tbb::parallel_for(0u, num_scalers_, [&](size_t sws_index) {
+					uint8_t *in_data[AV_NUM_DATA_POINTERS];
+					uint8_t *out_data[AV_NUM_DATA_POINTERS];
+					for (size_t i = 0; i < AV_NUM_DATA_POINTERS; i++)
+					{
+						in_data[i] = reinterpret_cast<uint8_t *>(in_frame->data[i] + (sws_index * (scale_slice_height_) * in_frame->linesize[i]));
+						// TODO: hack here
+						out_data[i] = reinterpret_cast<uint8_t *>(out_frame->data[i] + (out_frame->linesize[i] / (i == 0 ? 1 : 2) * ((is_imx50_pal ? 32u : 0u) + (sws_index * scale_slice_height_))));
+					}
+					sws_scale(sws_.at(sws_index).get(), in_data, in_frame->linesize, 0, scale_slice_height_, out_data, out_frame->linesize);
+				});
 				out_frame->height = c->height;
 				out_frame->width = c->width;
 				out_frame->format = c->pix_fmt;
@@ -475,12 +505,18 @@ namespace caspar {
 			{
 				AVCodecContext * codec_context = video_st_->codec;
 
+				video_convert_timer_.restart();
+
 				auto av_frame = convert_video(frame, codec_context);
+				
+				graph_->set_value("video-convert", video_convert_timer_.elapsed()*format_desc_.fps*0.5);
+				
 				av_frame->interlaced_frame = format_desc_.field_mode != core::field_mode::progressive;
 				av_frame->top_field_first = format_desc_.field_mode == core::field_mode::upper;
 				av_frame->pts = out_frame_number_++;
 
-				std::unique_ptr<AVPacket, std::function<void(AVPacket *)>> pkt(av_packet_alloc(), [](AVPacket *p) { av_packet_free(&p); });
+				video_encode_timer_.restart();
+				unique_ptr<AVPacket, function<void(AVPacket *)>> pkt(av_packet_alloc(), [](AVPacket *p) { av_packet_free(&p); });
 				av_init_packet(pkt.get());
 				int got_packet;
 
@@ -488,6 +524,8 @@ namespace caspar {
 
 				if (got_packet == 0)
 					return;
+
+				graph_->set_value("video-encode", video_encode_timer_.elapsed()*format_desc_.fps*0.5);
 
 				if (pkt->pts != AV_NOPTS_VALUE)
 					pkt->pts = av_rescale_q(pkt->pts, codec_context->time_base, video_st_->time_base);
@@ -507,7 +545,7 @@ namespace caspar {
 				{
 					uint64_t out_channel_layout = av_get_default_channel_layout(ctx->channels);
 					uint64_t in_channel_layout = create_channel_layout_bitmask(frame.num_channels());
-					swr_ = std::unique_ptr<SwrContext, std::function<void(SwrContext *)>>(
+					swr_ = unique_ptr<SwrContext, function<void(SwrContext *)>>(
 						swr_alloc_set_opts(nullptr,
 							out_channel_layout,
 							ctx->sample_fmt,
@@ -552,14 +590,14 @@ namespace caspar {
 				}
 			}
 
-			std::int64_t create_channel_layout_bitmask(int num_channels)
+			int64_t create_channel_layout_bitmask(int num_channels)
 			{
 				if (num_channels > 63)
 					BOOST_THROW_EXCEPTION(caspar_exception("FFMpeg cannot handle more than 63 audio channels"));
 				const auto ALL_63_CHANNELS = 0x7FFFFFFFFFFFFFFFULL;
 				auto to_shift = 63 - num_channels;
 				auto result = ALL_63_CHANNELS >> to_shift;
-				return static_cast<std::int64_t>(result);
+				return static_cast<int64_t>(result);
 			}
 
 			void encode_audio_buffer(bool is_last_frame)
@@ -573,8 +611,8 @@ namespace caspar {
 				int frame_size = input_audio_size / (av_get_bytes_per_sample(enc->sample_fmt) * enc->channels);
 				while (audio_bufers_[0].size() >= input_audio_size)
 				{
-					std::unique_ptr<AVPacket, std::function<void(AVPacket *)>> pkt(av_packet_alloc(), [](AVPacket *p) { av_packet_free(&p); });
-					std::unique_ptr<AVFrame, std::function<void(AVFrame *)>> in_frame(av_frame_alloc(), [](AVFrame *frame) { av_frame_free(&frame); });
+					unique_ptr<AVPacket, function<void(AVPacket *)>> pkt(av_packet_alloc(), [](AVPacket *p) { av_packet_free(&p); });
+					unique_ptr<AVFrame, function<void(AVFrame *)>> in_frame(av_frame_alloc(), [](AVFrame *frame) { av_frame_free(&frame); });
 					in_frame->nb_samples = frame_size;
 					in_frame->pts = out_audio_sample_number_;
 					out_audio_sample_number_ += frame_size;
@@ -614,10 +652,16 @@ namespace caspar {
 				encode_executor_.begin_invoke([=] {
 					frame_timer_.restart();
 
-					encode_video_frame(*frame);
-
-					if (!key_only_)
-						encode_audio_frame(*frame);
+					tbb::parallel_invoke(
+						[=]
+					{
+						encode_video_frame(*frame);
+					},
+						[=]
+					{
+						if (!key_only_)
+							encode_audio_frame(*frame);
+					});
 
 					graph_->set_value("frame-time", frame_timer_.elapsed()*format_desc_.fps*0.5);
 					graph_->set_text(print());
@@ -655,7 +699,7 @@ namespace caspar {
 
 			bool flush_stream(bool video)
 			{
-				std::shared_ptr<AVPacket> pkt(av_packet_alloc(), [](AVPacket *p) { av_packet_free(&p); });
+				shared_ptr<AVPacket> pkt(av_packet_alloc(), [](AVPacket *p) { av_packet_free(&p); });
 
 				av_init_packet(pkt.get());
 				auto stream = video ? video_st_.get() : audio_st_.get();
@@ -689,19 +733,19 @@ namespace caspar {
 			const bool						separate_key_;
 			output_format					output_format_;
 			core::video_format_desc			format_desc_;
-			const std::string				options_;
+			const string				options_;
 			const int						tc_in_;
 			const int						tc_out_;
 			core::recorder*					recorder_;
 			bool							recording_;
 			tbb::atomic<unsigned int>		frames_left_;
 
-			std::unique_ptr<ffmpeg_consumer> consumer_;
-			std::unique_ptr<ffmpeg_consumer> key_only_consumer_;
+			unique_ptr<ffmpeg_consumer> consumer_;
+			unique_ptr<ffmpeg_consumer> key_only_consumer_;
 
 		public:
 
-			ffmpeg_consumer_proxy(output_format format, const std::string options, const bool separate_key, core::recorder* recorder = nullptr, const int tc_in = 0, const int tc_out = std::numeric_limits<int>().max(), const unsigned int frame_limit = std::numeric_limits<unsigned int>().max())
+			ffmpeg_consumer_proxy(output_format format, const string options, const bool separate_key, core::recorder* recorder = nullptr, const int tc_in = 0, const int tc_out = numeric_limits<int>().max(), const unsigned int frame_limit = numeric_limits<unsigned int>().max())
 				: separate_key_(separate_key)
 				, output_format_(format)
 				, options_(options)
@@ -709,7 +753,7 @@ namespace caspar {
 				, tc_in_(tc_in)
 				, tc_out_(tc_out)
 				, recorder_(recorder)
-				, recording_(tc_out == std::numeric_limits<int>().max())
+				, recording_(tc_out == numeric_limits<int>().max())
 			{
 				frames_left_ = frame_limit;
 			}
@@ -757,10 +801,10 @@ namespace caspar {
 				{
 					if (recorder_)
 					{
-						if (tc_out_ != std::numeric_limits<int>().max())
+						if (tc_out_ != numeric_limits<int>().max())
 						{
 							int timecode = frame->get_timecode();
-							if (timecode == std::numeric_limits<int>().max())  // the frame does not contain timecode information
+							if (timecode == numeric_limits<int>().max())  // the frame does not contain timecode information
 								timecode = recorder_->GetTimecode();
 							if (!recording_ && timecode >= tc_in_)
 								recording_ = true;
@@ -794,7 +838,7 @@ namespace caspar {
 				return caspar::wrap_as_future(true);
 			}
 
-			virtual std::wstring print() const override
+			virtual wstring print() const override
 			{
 				return consumer_ ? consumer_->print() : L"[ffmpeg_consumer]";
 			}
@@ -830,14 +874,14 @@ namespace caspar {
 
 		};
 
-		safe_ptr<core::frame_consumer> create_capture_consumer(const std::wstring filename, const core::parameters& params, const int tc_in, const int tc_out, bool narrow_aspect_ratio, core::recorder* recorder)
+		safe_ptr<core::frame_consumer> create_capture_consumer(const wstring filename, const core::parameters& params, const int tc_in, const int tc_out, bool narrow_aspect_ratio, core::recorder* recorder)
 		{
-			std::wstring acodec = params.get_original(L"ACODEC");
-			std::wstring vcodec = params.get_original(L"VCODEC");
-			std::wstring options = params.get_original(L"OPTIONS");
+			wstring acodec = params.get_original(L"ACODEC");
+			wstring vcodec = params.get_original(L"VCODEC");
+			wstring options = params.get_original(L"OPTIONS");
 			int64_t		 arate = params.get(L"ARATE", 0LL);
 			int64_t		 vrate = params.get(L"VRATE", 0LL);
-			std::wstring file_tc = params.get(L"IN", L"00:00:00:00");
+			wstring file_tc = params.get(L"IN", L"00:00:00:00");
 			output_format format(
 				narrow(env::media_folder() + filename),
 				avcodec_find_encoder_by_name(narrow(acodec).c_str()),
@@ -851,11 +895,11 @@ namespace caspar {
 			return make_safe<ffmpeg_consumer_proxy>(format, narrow(options), false, recorder, tc_in, tc_out, static_cast<unsigned int>(tc_out - tc_in));
 		}
 
-		safe_ptr<core::frame_consumer> create_manual_record_consumer(const std::wstring filename, const core::parameters& params, const unsigned int frame_limit, bool narrow_aspect_ratio, core::recorder* recorder)
+		safe_ptr<core::frame_consumer> create_manual_record_consumer(const wstring filename, const core::parameters& params, const unsigned int frame_limit, bool narrow_aspect_ratio, core::recorder* recorder)
 		{
-			std::wstring acodec = params.get_original(L"ACODEC");
-			std::wstring vcodec = params.get_original(L"VCODEC");
-			std::wstring options = params.get_original(L"OPTIONS");
+			wstring acodec = params.get_original(L"ACODEC");
+			wstring vcodec = params.get_original(L"VCODEC");
+			wstring options = params.get_original(L"OPTIONS");
 			int64_t		 arate = params.get(L"ARATE", 0LL);
 			int64_t		 vrate = params.get(L"VRATE", 0LL);
 			output_format format(
@@ -866,9 +910,9 @@ namespace caspar {
 				!narrow_aspect_ratio,
 				arate,
 				vrate,
-				std::string("00:00:00:00")
+				string("00:00:00:00")
 			);
-			return make_safe<ffmpeg_consumer_proxy>(format, narrow(options), false, recorder, 0, std::numeric_limits<int>().max(), frame_limit);
+			return make_safe<ffmpeg_consumer_proxy>(format, narrow(options), false, recorder, 0, numeric_limits<int>().max(), frame_limit);
 		}
 
 
@@ -876,12 +920,12 @@ namespace caspar {
 		{
 			if (params.size() < 1 || (params[0] != L"FILE" && params[0] != L"STREAM"))
 				return core::frame_consumer::empty();
-			std::wstring filename = (params.size() > 1 ? params.at_original(1) : L"");
+			wstring filename = (params.size() > 1 ? params.at_original(1) : L"");
 			bool separate_key = params.has(L"SEPARATE_KEY");
 			bool is_stream = params[0] == L"STREAM";
-			std::wstring acodec = params.get_original(L"ACODEC");
-			std::wstring vcodec = params.get_original(L"VCODEC");
-			std::wstring options = params.get_original(L"OPTIONS");
+			wstring acodec = params.get_original(L"ACODEC");
+			wstring vcodec = params.get_original(L"VCODEC");
+			wstring options = params.get_original(L"OPTIONS");
 			int64_t		 arate = params.get(L"ARATE", 0LL);
 			int64_t		 vrate = params.get(L"VRATE", 0LL);
 			bool		 narrow_aspect_ratio = params.get(L"NARROW", false);
@@ -893,7 +937,7 @@ namespace caspar {
 				!narrow_aspect_ratio,
 				arate,
 				vrate,
-				std::string("00:00:00:00")
+				string("00:00:00:00")
 			);
 
 			return make_safe<ffmpeg_consumer_proxy>(format, narrow(options), separate_key);
@@ -901,7 +945,7 @@ namespace caspar {
 
 		safe_ptr<core::frame_consumer> create_consumer(const boost::property_tree::wptree& ptree)
 		{
-			auto filename = ptree.get<std::wstring>(L"path");
+			auto filename = ptree.get<wstring>(L"path");
 			auto vcodec = ptree.get(L"vcodec", L"libx264");
 			auto acodec = ptree.get(L"acodec", L"aac");
 			auto separate_key = ptree.get(L"separate-key", false);
@@ -916,7 +960,7 @@ namespace caspar {
 				!ptree.get(L"narrow", true),
 				arate,
 				vrate, 
-				std::string("00:00:00:00")
+				string("00:00:00:00")
 			);
 
 			return make_safe<ffmpeg_consumer_proxy>(format, narrow(options), separate_key);

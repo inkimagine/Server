@@ -268,7 +268,7 @@ void init(const safe_ptr<core::media_info_repository>& media_info_repo)
 
 void uninit()
 {
-	avfilter_uninit();
+	// avfilter_uninit(); deprecated?
     avformat_network_deinit();
 	av_lockmgr_register(nullptr);
 }
