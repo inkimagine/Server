@@ -193,7 +193,7 @@ class flash_renderer
 
 	high_prec_timer									timer_;
 public:
-	flash_renderer(const safe_ptr<diagnostics::graph>& graph, const std::shared_ptr<core::frame_factory>& frame_factory, const std::wstring& filename, int width, int height) 
+	flash_renderer(const safe_ptr<diagnostics::graph>& graph, const std::shared_ptr<core::frame_factory>& frame_factory, const std::wstring& filename, int width, int height)
 		: graph_(graph)
 		, width_(width)
 		, height_(height)
@@ -202,53 +202,46 @@ public:
 		, ax_(nullptr)
 		, head_(core::basic_frame::late())
 		, bmp_(width, height)
-	{		
+	{
 		graph_->set_color("frame-time", diagnostics::color(0.1f, 1.0f, 0.1f));
 		graph_->set_color("tick-time", diagnostics::color(0.0f, 0.6f, 0.9f));
 		graph_->set_color("param", diagnostics::color(1.0f, 0.5f, 0.0f));
 
-		lock(get_global_init_destruct_mutex(), [this]
-		{
+		CoInitialize(nullptr);
 
-			CoInitialize(nullptr);
+		if (FAILED(CComObject<caspar::flash::FlashAxContainer>::CreateInstance(&ax_)))
+			BOOST_THROW_EXCEPTION(caspar_exception() << msg_info(narrow(print()) + " Failed to create FlashAxContainer"));
 
-			if(FAILED(CComObject<caspar::flash::FlashAxContainer>::CreateInstance(&ax_)))
-				BOOST_THROW_EXCEPTION(caspar_exception() << msg_info(narrow(print()) + " Failed to create FlashAxContainer"));
-		
-			if(FAILED(ax_->CreateAxControl()))
-				BOOST_THROW_EXCEPTION(caspar_exception() << msg_info(narrow(print()) + " Failed to Create FlashAxControl"));
-		});
+		if (FAILED(ax_->CreateAxControl()))
+			BOOST_THROW_EXCEPTION(caspar_exception() << msg_info(narrow(print()) + " Failed to Create FlashAxControl"));
 
-		ax_->set_print([this]{return print();});
-		
+		ax_->set_print([this] {return print(); });
+
 		CComPtr<IShockwaveFlash> spFlash;
-		if(FAILED(ax_->QueryControl(&spFlash)))
+		if (FAILED(ax_->QueryControl(&spFlash)))
 			BOOST_THROW_EXCEPTION(caspar_exception() << msg_info(narrow(print()) + " Failed to Query FlashAxControl"));
-												
-		if(FAILED(spFlash->put_Playing(true)) )
+
+		if (FAILED(spFlash->put_Playing(true)))
 			BOOST_THROW_EXCEPTION(caspar_exception() << msg_info(narrow(print()) + " Failed to start playing Flash"));
 
-		if(FAILED(spFlash->put_Movie(CComBSTR(filename.c_str()))))
+		if (FAILED(spFlash->put_Movie(CComBSTR(filename.c_str()))))
 			BOOST_THROW_EXCEPTION(caspar_exception() << msg_info(narrow(print()) + " Failed to Load Template Host"));
-										
-		if(FAILED(spFlash->put_ScaleMode(2)))  //Exact fit. Scale without respect to the aspect ratio.
+
+		if (FAILED(spFlash->put_ScaleMode(2)))  //Exact fit. Scale without respect to the aspect ratio.
 			BOOST_THROW_EXCEPTION(caspar_exception() << msg_info(narrow(print()) + " Failed to Set Scale Mode"));
-						
-		ax_->SetSize(width_, height_);		
+
+		ax_->SetSize(width_, height_);
 		render_frame(0.0);
-	
+
 		CASPAR_LOG(info) << print() << L" Initialized.";
 	}
 
 	~flash_renderer()
 	{		
-		if(ax_)
+		if (ax_)
 		{
-			lock(get_global_init_destruct_mutex(), [this]
-			{
-				ax_->DestroyAxControl();
-				ax_->Release();
-			});
+			ax_->DestroyAxControl();
+			ax_->Release();
 		}
 		graph_->set_value("tick-time", 0.0f);
 		graph_->set_value("frame-time", 0.0f);
