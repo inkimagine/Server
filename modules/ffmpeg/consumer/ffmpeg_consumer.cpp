@@ -205,7 +205,7 @@ namespace caspar {
 				diagnostics::register_graph(graph_);
 
 				encode_executor_.set_priority_class(high_priority_class);
-				encode_executor_.set_capacity(8);
+				encode_executor_.set_capacity(16);
 
 				try
 				{
@@ -402,7 +402,7 @@ namespace caspar {
 					THROW_ON_ERROR2(avcodec_open2(c, encoder, &options_), "[ffmpeg_consumer]");
 				}
 
-				picture_buf_.resize(av_image_get_buffer_size(c->pix_fmt, c->width, c->height, 16));
+				picture_buf_.resize(av_image_get_buffer_size(c->pix_fmt, c->width, c->height, 32));
 
 				return st;
 			}
@@ -515,40 +515,47 @@ namespace caspar {
 
 			void encode_video_frame(core::read_frame& frame)
 			{
-				AVCodecContext * codec_context = video_st_->codec;
+				try
+				{
+					AVCodecContext * codec_context = video_st_->codec;
 
-				video_convert_timer_.restart();
+					video_convert_timer_.restart();
 
-				auto av_frame = convert_video(frame, codec_context);
-				
-				graph_->set_value("video-convert", video_convert_timer_.elapsed()*format_desc_.fps*0.5);
-				
-				av_frame->interlaced_frame = format_desc_.field_mode != core::field_mode::progressive;
-				av_frame->top_field_first = format_desc_.field_mode == core::field_mode::upper;
-				av_frame->pts = out_frame_number_++;
+					auto av_frame = convert_video(frame, codec_context);
 
-				video_encode_timer_.restart();
-				unique_ptr<AVPacket, function<void(AVPacket *)>> pkt(av_packet_alloc(), [](AVPacket *p) { av_packet_free(&p); });
-				av_init_packet(pkt.get());
-				int got_packet;
+					graph_->set_value("video-convert", video_convert_timer_.elapsed()*format_desc_.fps*0.5);
 
-				avcodec_encode_video2(codec_context, pkt.get(), av_frame.get(), &got_packet);// , "[video_encoder]");
+					av_frame->interlaced_frame = format_desc_.field_mode != core::field_mode::progressive;
+					av_frame->top_field_first = format_desc_.field_mode == core::field_mode::upper;
+					av_frame->pts = out_frame_number_++;
 
-				if (got_packet == 0)
-					return;
+					video_encode_timer_.restart();
+					unique_ptr<AVPacket, function<void(AVPacket *)>> pkt(av_packet_alloc(), [](AVPacket *p) { av_packet_free(&p); });
+					av_init_packet(pkt.get());
+					int got_packet;
 
-				graph_->set_value("video-encode", video_encode_timer_.elapsed()*format_desc_.fps*0.5);
+					avcodec_encode_video2(codec_context, pkt.get(), av_frame.get(), &got_packet);// , "[video_encoder]");
 
-				if (pkt->pts != AV_NOPTS_VALUE)
-					pkt->pts = av_rescale_q(pkt->pts, codec_context->time_base, video_st_->time_base);
-				if (pkt->dts != AV_NOPTS_VALUE)
-					pkt->dts = av_rescale_q(pkt->dts, codec_context->time_base, video_st_->time_base);
+					if (got_packet == 0)
+						return;
 
-				if (codec_context->coded_frame->key_frame)
-					pkt->flags |= AV_PKT_FLAG_KEY;
+					graph_->set_value("video-encode", video_encode_timer_.elapsed()*format_desc_.fps*0.5);
 
-				pkt->stream_index = video_st_->index;
-				THROW_ON_ERROR2(av_interleaved_write_frame(format_context_.get(), pkt.get()), "[video_encoder]");
+					if (pkt->pts != AV_NOPTS_VALUE)
+						pkt->pts = av_rescale_q(pkt->pts, codec_context->time_base, video_st_->time_base);
+					if (pkt->dts != AV_NOPTS_VALUE)
+						pkt->dts = av_rescale_q(pkt->dts, codec_context->time_base, video_st_->time_base);
+
+					if (codec_context->coded_frame->key_frame)
+						pkt->flags |= AV_PKT_FLAG_KEY;
+
+					pkt->stream_index = video_st_->index;
+					THROW_ON_ERROR2(av_interleaved_write_frame(format_context_.get(), pkt.get()), "[video_encoder]");
+				}
+				catch (...)
+				{
+					CASPAR_LOG_CURRENT_EXCEPTION()
+				}
 			}
 
 			void resample_audio(core::read_frame& frame, AVCodecContext* ctx)
@@ -577,9 +584,9 @@ namespace caspar {
 				const int out_samples_count = static_cast<int>(av_rescale_rnd(in_samples_count, ctx->sample_rate, format_desc_.audio_sample_rate, AV_ROUND_UP));
 				if (audio_is_planar)
 					for (char i = 0; i < ctx->channels; i++)
-						out_buffers[i].resize(out_samples_count * av_get_bytes_per_sample(AV_SAMPLE_FMT_S32));
+						out_buffers[i].resize(out_samples_count * av_get_bytes_per_sample(ctx->sample_fmt));
 				else
-					out_buffers[0].resize(out_samples_count * av_get_bytes_per_sample(AV_SAMPLE_FMT_S32) *ctx->channels);
+					out_buffers[0].resize(out_samples_count * av_get_bytes_per_sample(ctx->sample_fmt) *ctx->channels);
 
 				const uint8_t* in[] = { reinterpret_cast<const uint8_t*>(frame.audio_data().begin()) };
 				uint8_t*       out[AV_NUM_DATA_POINTERS];
@@ -655,15 +662,21 @@ namespace caspar {
 
 			void encode_audio_frame(core::read_frame& frame)
 			{
-				resample_audio(frame, audio_st_->codec);
-				encode_audio_buffer(false);
+				try
+				{
+					resample_audio(frame, audio_st_->codec);
+					encode_audio_buffer(false);
+				}
+				catch (...)
+				{
+					CASPAR_LOG_CURRENT_EXCEPTION()
+				}
 			}
 
 			void send(const safe_ptr<core::read_frame>& frame)
 			{
-				encode_executor_.begin_invoke([=] {
+				encode_executor_.begin_invoke([frame, this] {
 					frame_timer_.restart();
-
 					tbb::parallel_invoke(
 						[=]
 					{
@@ -674,7 +687,6 @@ namespace caspar {
 						if (!key_only_)
 							encode_audio_frame(*frame);
 					});
-
 					graph_->set_value("frame-time", frame_timer_.elapsed()*format_desc_.fps*0.5);
 					graph_->set_text(print());
 					current_encoding_delay_ = frame->get_age_millis();
