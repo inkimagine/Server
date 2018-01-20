@@ -162,6 +162,7 @@ namespace caspar {
 
 			bool																key_only_;
 			bool																audio_is_planar;
+			bool																is_colour_planes_interleaved_;
 			tbb::atomic<int64_t>												current_encoding_delay_;
 			boost::timer														frame_timer_;
 			boost::timer														video_convert_timer_;
@@ -186,7 +187,7 @@ namespace caspar {
 				, output_format_(format)
 				, key_only_(key_only)
 				, options_(nullptr)
-				, num_scalers_(4)
+				, num_scalers_(format_desc.height > 1080 ? 4 : 1)
 				, scale_slice_height_(format_desc.height / num_scalers_)
 			{
 				current_encoding_delay_ = 0;
@@ -403,6 +404,7 @@ namespace caspar {
 				}
 
 				picture_buf_.resize(av_image_get_buffer_size(c->pix_fmt, c->width, c->height, 32));
+				is_colour_planes_interleaved_ = c->pix_fmt == AV_PIX_FMT_YUV420P;
 
 				return st;
 			}
@@ -492,17 +494,14 @@ namespace caspar {
 				}
 
 				shared_ptr<AVFrame> out_frame(av_frame_alloc(), [](AVFrame* frame) { av_frame_free(&frame); });
-				bool is_imx50_pal = output_format_.is_mxf && format_desc_.format == core::video_format::pal;
-
 				av_image_fill_arrays(out_frame->data, out_frame->linesize, picture_buf_.data(), c->pix_fmt, c->width, c->height, 16);
-				tbb::parallel_for(0u, num_scalers_, [&](size_t sws_index) {
+				tbb::parallel_for(0u, num_scalers_, [&](const size_t& sws_index) {
 					uint8_t *in_data[AV_NUM_DATA_POINTERS];
 					uint8_t *out_data[AV_NUM_DATA_POINTERS];
 					for (size_t i = 0; i < AV_NUM_DATA_POINTERS; i++)
 					{
-						in_data[i] = reinterpret_cast<uint8_t *>(in_frame->data[i] + (sws_index * (scale_slice_height_) * in_frame->linesize[i]));
-						// TODO: hack here
-						out_data[i] = reinterpret_cast<uint8_t *>(out_frame->data[i] + (out_frame->linesize[i] / (i == 0 ? 1 : 2) * ((is_imx50_pal ? 32u : 0u) + (sws_index * scale_slice_height_))));
+						in_data[i] = reinterpret_cast<uint8_t *>(in_frame->data[i] + (sws_index * scale_slice_height_ * in_frame->linesize[i]));
+						out_data[i] = reinterpret_cast<uint8_t *>(out_frame->data[i] + (sws_index * scale_slice_height_ * out_frame->linesize[i] / (i > 0 && is_colour_planes_interleaved_ ? 2 : 1)));
 					}
 					sws_scale(sws_.at(sws_index).get(), in_data, in_frame->linesize, 0, scale_slice_height_, out_data, out_frame->linesize);
 				});

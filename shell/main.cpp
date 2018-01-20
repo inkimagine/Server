@@ -310,7 +310,7 @@ int main(int argc, wchar_t* argv[])
 					{
 						// This is just dummy code for testing.
 						if(wcmd.substr(0, 1) == L"1")
-							wcmd = L"PLAY 1-0 ZEGAR";
+							wcmd = L"PLAY 1-0 AMB LOOP";
 						else if(wcmd.substr(0, 1) == L"2")
 							wcmd = L"ADD 1 FILE RECORDING.MXF";
 						else if(wcmd.substr(0, 1) == L"3")
