@@ -24,6 +24,7 @@ EXPORTS
     av_buffersrc_parameters_set
     av_buffersrc_write_frame
     av_filter_ffversion
+    av_filter_iterate
     avfilter_add_matrix
     avfilter_all_channel_layouts
     avfilter_config_links

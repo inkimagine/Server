@@ -11,6 +11,7 @@ EXPORTS
     av_bsf_get_class
     av_bsf_get_null_filter
     av_bsf_init
+    av_bsf_iterate
     av_bsf_list_alloc
     av_bsf_list_append
     av_bsf_list_append2
@@ -30,6 +31,7 @@ EXPORTS
     av_codec_get_seek_preroll
     av_codec_is_decoder
     av_codec_is_encoder
+    av_codec_iterate
     av_codec_next
     av_codec_set_chroma_intra_matrix
     av_codec_set_codec_descriptor
@@ -86,6 +88,8 @@ EXPORTS
     av_packet_free_side_data
     av_packet_from_data
     av_packet_get_side_data
+    av_packet_make_refcounted
+    av_packet_make_writable
     av_packet_merge_side_data
     av_packet_move_ref
     av_packet_new_side_data
@@ -100,6 +104,7 @@ EXPORTS
     av_parser_change
     av_parser_close
     av_parser_init
+    av_parser_iterate
     av_parser_next
     av_parser_parse2
     av_picture_copy
@@ -157,6 +162,8 @@ EXPORTS
     avcodec_get_class
     avcodec_get_context_defaults3
     avcodec_get_frame_class
+    avcodec_get_hw_config
+    avcodec_get_hw_frames_parameters
     avcodec_get_name
     avcodec_get_pix_fmt_loss
     avcodec_get_subtitle_rect_class
@@ -188,6 +195,9 @@ EXPORTS
     avpriv_ac3_parse_header
     avpriv_align_put_bits
     avpriv_bprint_to_extradata
+    avpriv_codec2_mode_bit_rate
+    avpriv_codec2_mode_block_align
+    avpriv_codec2_mode_frame_size
     avpriv_codec_get_cap_skip_frame_fill_param
     avpriv_copy_bits
     avpriv_dca_convert_bitstream
@@ -204,7 +214,6 @@ EXPORTS
     avpriv_get_raw_pix_fmt_tags
     avpriv_h264_has_num_reorder_frames
     avpriv_init_elbg
-    avpriv_lock_avformat
     avpriv_mjpeg_bits_ac_chrominance
     avpriv_mjpeg_bits_ac_luminance
     avpriv_mjpeg_bits_dc_chrominance
@@ -223,5 +232,4 @@ EXPORTS
     avpriv_split_xiph_headers
     avpriv_tak_parse_streaminfo
     avpriv_toupper4
-    avpriv_unlock_avformat
     avsubtitle_free

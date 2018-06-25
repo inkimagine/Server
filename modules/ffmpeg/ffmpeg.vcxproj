@@ -332,7 +332,6 @@
       </Command>
     </PreLinkEvent>
     <Link>
-      <AdditionalDependencies>avformat-58.lib;avcodec-58.lib;avutil-56.lib;swscale-5.lib;tbb.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <Version>
       </Version>
       <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
@@ -388,9 +387,6 @@
       </Command>
     </PreLinkEvent>
     <Link>
-      <AdditionalDependencies>avformat-58.lib;avcodec-58.lib;avutil-56.lib;swscale-5.lib;tbb.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <Version>
-      </Version>
       <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <IgnoreSpecificDefaultLibraries>LIBC.lib;%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
       <GenerateDebugInformation>true</GenerateDebugInformation>
@@ -443,7 +439,6 @@
       </Command>
     </PreLinkEvent>
     <Link>
-      <AdditionalDependencies>avformat-58.lib;avcodec-58.lib;avutil-56.lib;swscale-5.lib;tbb.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <Version>
       </Version>
       <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>

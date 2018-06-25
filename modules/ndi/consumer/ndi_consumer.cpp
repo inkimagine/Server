@@ -105,6 +105,7 @@ namespace caspar {
 			const core::channel_layout										channel_layout_;
 			const std::wstring												ndi_name_;
 			const bool														is_alpha_;
+			const bool														is_blocking_;
 			const NDIlib_v2*												ndi_lib_;
 			const NDIlib_send_instance_t									ndi_send_;
 			std::vector<uint8_t, tbb::cache_aligned_allocator<uint8_t>>     send_frame_buffer_;
@@ -122,11 +123,12 @@ namespace caspar {
 
 			// frame_consumer
 
-			ndi_consumer(const core::video_format_desc format_desc, const core::channel_layout channel_layout, const std::string& ndi_name, const std::string groups, const bool is_alpha)
+			ndi_consumer(const core::video_format_desc& format_desc, const core::channel_layout& channel_layout, const std::string& ndi_name, const std::string& groups, const bool is_alpha, const bool is_blocking)
 				: channel_layout_(channel_layout)
 				, format_desc_(format_desc)
 				, ndi_name_(widen(ndi_name))
 				, is_alpha_(is_alpha)
+				, is_blocking_(is_blocking)
 				, ndi_lib_(load_ndi())
 				, ndi_send_(create_ndi_send(ndi_lib_, ndi_name, groups))
 				, executor_(print())
@@ -139,6 +141,7 @@ namespace caspar {
 				graph_->set_color("audio-send-time", diagnostics::color(0.5f, 1.0f, 0.1f));
 				graph_->set_color("video-send-time", diagnostics::color(1.0f, 1.0f, 0.1f));
 				graph_->set_color("tick-time", diagnostics::color(0.0f, 0.6f, 0.9f));
+				graph_->set_color("dropped-frame", diagnostics::color(1.0f, 0.1f, 0.1f));
 				if (!is_alpha)
 					graph_->set_color("frame-convert-time", diagnostics::color(0.8f, 0.6f, 0.9f));
 				diagnostics::register_graph(graph_);
@@ -146,27 +149,40 @@ namespace caspar {
 
 			~ndi_consumer()
 			{
+				executor_.stop();
+				executor_.join();
 				if (ndi_send_)
 					ndi_lib_->NDIlib_send_destroy(ndi_send_);
 				CASPAR_LOG(info) << print() << L" Successfully Uninitialized.";
 			}
+
+			bool do_send(const safe_ptr<core::read_frame>& frame)
+			{
+				send_video(frame);
+				audio_send_timer_.restart();
+				send_audio(frame);
+				graph_->set_value("audio-send-time", audio_send_timer_.elapsed() * format_desc_.fps * 0.5f);
+				current_encoding_delay_ = frame->get_age_millis();
+				graph_->set_value("tick-time", tick_timer_.elapsed() * format_desc_.fps * 0.5f);
+				tick_timer_.restart();
+				return true;
+			}
 						
 			boost::unique_future<bool> send(const safe_ptr<core::read_frame>& frame)
 			{
-				if (executor_.size() < executor_.capacity()) 
-					return executor_.begin_invoke([this, frame]() -> bool {
-					send_video(frame);
-					audio_send_timer_.restart();
-					send_audio(frame);
-					graph_->set_value("audio-send-time", audio_send_timer_.elapsed() * format_desc_.fps * 0.5f);
-					current_encoding_delay_ = frame->get_age_millis();
-					graph_->set_value("tick-time", tick_timer_.elapsed() * format_desc_.fps * 0.5f);
-					tick_timer_.restart();
-					return true;
-				});
+				if (is_blocking_)
+					return executor_.begin_invoke([this, frame]() -> bool { return do_send(frame); });
 				else
 				{
-					CASPAR_LOG(warning) << print() << L" Frame dropped.";
+					if (executor_.is_running() && executor_.empty())
+						executor_.begin_invoke([this, frame]() {
+						do_send(frame);
+					});
+					else
+					{
+						CASPAR_LOG(warning) << print() << L" Frame dropped.";
+						graph_->set_tag("dropped-frame");
+					}
 					return caspar::wrap_as_future(true);
 				}
 			}
@@ -231,25 +247,27 @@ namespace caspar {
 			const std::string						ndi_name_;
 			const std::string						groups_;
 			const bool								is_alpha_;
+			const bool								is_blocking_;
 
 		public:
 
-			ndi_consumer_proxy(core::channel_layout channel_layout, const std::string& ndi_name, const std::string& groups, bool is_alpha)
+			ndi_consumer_proxy(core::channel_layout channel_layout, const std::string& ndi_name, const std::string& groups, const bool is_alpha, const bool is_blocking)
 				: index_(NDI_CONSUMER_BASE_INDEX + crc16(ndi_name))
 				, channel_layout_(channel_layout)
 				, ndi_name_(ndi_name)
 				, groups_(groups)
 				, is_alpha_(is_alpha)
+				, is_blocking_(is_blocking)
 			{	}
 
 			virtual void initialize(const core::video_format_desc& format_desc, int) override
 			{
-				consumer_.reset(new ndi_consumer(format_desc, channel_layout_, ndi_name_, groups_, is_alpha_));
+				consumer_.reset(new ndi_consumer(format_desc, channel_layout_, ndi_name_, groups_, is_alpha_, is_blocking_));
 			}
 
 			virtual bool has_synchronization_clock() const override
 			{
-				return false;
+				return consumer_ && is_blocking_;
 			}
 
 			virtual size_t buffer_depth() const override
@@ -271,7 +289,7 @@ namespace caspar {
 
 			virtual std::wstring print() const override
 			{
-				return consumer_ ? consumer_->print() : L"NewTel NDI[" + widen(ndi_name_) + L" (uninitialized)]";
+				return consumer_ ? consumer_->print() : L"NewTel NDI[" + widen(ndi_name_) + L" (not initialized)]";
 			}
 
 			virtual boost::property_tree::wptree info() const override
@@ -300,10 +318,11 @@ namespace caspar {
 				ndi_name = narrow(params.at(1));
 			std::string groups = narrow(params.get(L"GROUPS", L""));
 			bool is_alpha = params.get(L"ALPHA", true);
+			bool is_blocking = params.get(L"BLOCKING", false);
 			auto channel_layout = core::default_channel_layout_repository()
 				.get_by_name(
 					params.get(L"CHANNEL_LAYOUT", L"STEREO"));
-			return make_safe<ndi_consumer_proxy>(channel_layout, ndi_name, groups, is_alpha);
+			return make_safe<ndi_consumer_proxy>(channel_layout, ndi_name, groups, is_alpha, is_blocking);
 		}
 
 		safe_ptr<core::frame_consumer> create_ndi_consumer(const boost::property_tree::wptree& ptree)
@@ -311,11 +330,12 @@ namespace caspar {
 			auto ndi_name = narrow(ptree.get(L"name", L"default"));
 			auto groups = narrow(ptree.get(L"groups", L""));
 			bool is_alpha = ptree.get(L"alpha", true);
+			bool is_blocking = ptree.get(L"blocking", false);
 			auto channel_layout =
 				core::default_channel_layout_repository()
 				.get_by_name(
 					boost::to_upper_copy(ptree.get(L"channel-layout", L"STEREO")));
-			return make_safe<ndi_consumer_proxy>(channel_layout, ndi_name, groups, is_alpha);
+			return make_safe<ndi_consumer_proxy>(channel_layout, ndi_name, groups, is_alpha, is_blocking);
 		}
 
 	}

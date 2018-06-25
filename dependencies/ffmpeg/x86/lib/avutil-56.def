@@ -11,6 +11,7 @@ EXPORTS
     av_aes_ctr_get_iv
     av_aes_ctr_increment_iv
     av_aes_ctr_init
+    av_aes_ctr_set_full_iv
     av_aes_ctr_set_iv
     av_aes_ctr_set_random_iv
     av_aes_init
@@ -120,6 +121,15 @@ EXPORTS
     av_dynarray2_add
     av_dynarray_add
     av_dynarray_add_nofree
+    av_encryption_info_add_side_data
+    av_encryption_info_alloc
+    av_encryption_info_clone
+    av_encryption_info_free
+    av_encryption_info_get_side_data
+    av_encryption_init_info_add_side_data
+    av_encryption_init_info_alloc
+    av_encryption_init_info_free
+    av_encryption_init_info_get_side_data
     av_escape
     av_expr_eval
     av_expr_free
@@ -175,6 +185,7 @@ EXPORTS
     av_frame_make_writable
     av_frame_move_ref
     av_frame_new_side_data
+    av_frame_new_side_data_from_buf
     av_frame_ref
     av_frame_remove_side_data
     av_frame_set_best_effort_timestamp

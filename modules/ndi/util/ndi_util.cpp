@@ -40,7 +40,7 @@ extern "C"
 
 namespace caspar { namespace ndi {
 
-NDIlib_video_frame_t * create_video_frame(const core::video_format_desc format, const bool is_alpha)
+NDIlib_video_frame_t * create_video_frame(const core::video_format_desc& format, const bool is_alpha)
 {
 	NDIlib_video_frame_t* frame = new NDIlib_video_frame_t();
 	if (frame)
@@ -59,7 +59,7 @@ NDIlib_video_frame_t * create_video_frame(const core::video_format_desc format, 
 	return frame;
 }
 
-NDIlib_audio_frame_interleaved_32f_t * create_weak_audio_frame(core::channel_layout layout, const int nb_samples, const int sample_rate)
+NDIlib_audio_frame_interleaved_32f_t * create_weak_audio_frame(const core::channel_layout& layout, const int nb_samples, const int sample_rate)
 {
 	auto f = new NDIlib_audio_frame_interleaved_32f_t();
 	if (f)
@@ -68,12 +68,12 @@ NDIlib_audio_frame_interleaved_32f_t * create_weak_audio_frame(core::channel_lay
 		f->no_samples = nb_samples;
 		f->sample_rate = sample_rate;
 		f->p_data = (float*)malloc(nb_samples * layout.num_channels * sizeof(float));
-		f->timecode = 0LL;
+		f->timecode = NDIlib_send_timecode_synthesize;
 	}
 	return f;
 }
 
-std::shared_ptr<NDIlib_audio_frame_interleaved_32f_t> create_audio_frame(core::channel_layout layout, const int nb_samples, const int sample_rate)
+std::shared_ptr<NDIlib_audio_frame_interleaved_32f_t> create_audio_frame(const core::channel_layout& layout, const int nb_samples, const int sample_rate)
 {
 	return std::shared_ptr<NDIlib_audio_frame_interleaved_32f_t>(
 		create_weak_audio_frame(layout, nb_samples, sample_rate),
