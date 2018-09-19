@@ -158,6 +158,8 @@ namespace caspar {
 			const size_t																num_scalers_;
 			const size_t																scale_slice_height_;
 
+			std::shared_ptr<AVFrame>													out_frame_;
+
 			byte_vector								audio_bufers_[AV_NUM_DATA_POINTERS];
 			byte_vector								key_picture_buf_;
 			byte_vector								picture_buf_;
@@ -170,6 +172,7 @@ namespace caspar {
 			bool									is_colour_planes_interleaved_;
 			tbb::atomic<int64_t>					current_encoding_delay_;
 			boost::timer							frame_timer_;
+			boost::timer							convert_timer_;
 			executor								encode_executor_;
 
 		public:
@@ -185,8 +188,9 @@ namespace caspar {
 				, format_desc_(format_desc)
 				, key_only_(key_only)
 				, options_(read_parameters(params.options_))
-				, num_scalers_(format_desc.height >= 1080 ? 4 : 1)
+				, num_scalers_(format_desc.height >= 1080 ? 16 : 1)
 				, scale_slice_height_(format_desc.height / num_scalers_)
+				, out_frame_(av_frame_alloc(), [](AVFrame* frame) { av_frame_free(&frame); })
 			{
 				current_encoding_delay_ = 0;
 				out_frame_number_ = 0;
@@ -196,6 +200,7 @@ namespace caspar {
 
 				graph_->set_color("frame-time", diagnostics::color(0.1f, 1.0f, 0.1f));
 				graph_->set_color("dropped-frame", diagnostics::color(1.0f, 0.1f, 0.1f));
+				graph_->set_color("convert-time", diagnostics::color(0.4f, 0.4f, 1.0f));
 				graph_->set_text(print());
 				diagnostics::register_graph(graph_);
 
@@ -416,8 +421,14 @@ namespace caspar {
 					THROW_ON_ERROR2(avcodec_open2(c, encoder, &options_), "[ffmpeg_consumer]");
 				}
 
-				picture_buf_.resize(av_image_get_buffer_size(c->pix_fmt, c->width, c->height, 16));
+				picture_buf_.resize(av_image_get_buffer_size(c->pix_fmt, c->width, c->height, 32));
 				is_colour_planes_interleaved_ = c->pix_fmt == AV_PIX_FMT_YUV420P;
+				av_image_fill_arrays(out_frame_->data, out_frame_->linesize, picture_buf_.data(), c->pix_fmt, c->width, c->height, 32);
+				out_frame_->height = c->height;
+				out_frame_->width = c->width;
+				out_frame_->format = c->pix_fmt;
+				out_frame_->interlaced_frame = format_desc_.field_mode != core::field_mode::progressive;
+				out_frame_->top_field_first = format_desc_.field_mode == core::field_mode::upper;
 
 				return st;
 			}
@@ -472,7 +483,7 @@ namespace caspar {
 				return st;
 			}
 
-			std::shared_ptr<AVFrame> convert_video(core::read_frame& frame, AVCodecContext* c)
+			void convert_video(core::read_frame& frame, AVCodecContext* c)
 			{
 
 				if (sws_.empty())
@@ -491,6 +502,7 @@ namespace caspar {
 				std::unique_ptr<AVFrame, std::function<void(AVFrame *)>> in_frame(av_frame_alloc(), [](AVFrame *frame) { av_frame_free(&frame); });
 				auto in_picture = reinterpret_cast<AVPicture*>(in_frame.get());
 
+
 				if (key_only_)
 				{
 					key_picture_buf_.resize(frame.image_data().size());
@@ -503,49 +515,44 @@ namespace caspar {
 					avpicture_fill(in_picture, const_cast<uint8_t*>(frame.image_data().begin()), AV_PIX_FMT_BGRA, format_desc_.width, format_desc_.height);
 				}
 
-				std::shared_ptr<AVFrame> out_frame(av_frame_alloc(), [](AVFrame* frame) { av_frame_free(&frame); });
 
-				av_image_fill_arrays(out_frame->data, out_frame->linesize, picture_buf_.data(), c->pix_fmt, c->width, c->height, 16);
+
+				convert_timer_.restart();
+
 				tbb::parallel_for(0u, num_scalers_, [&](const size_t& sws_index) {
 					uint8_t *in_data[AV_NUM_DATA_POINTERS];
 					uint8_t *out_data[AV_NUM_DATA_POINTERS];
 					for (size_t i = 0; i < AV_NUM_DATA_POINTERS; i++)
 					{
 						in_data[i] = reinterpret_cast<uint8_t *>(in_frame->data[i] + (sws_index * scale_slice_height_ * in_frame->linesize[i]));
-						out_data[i] = reinterpret_cast<uint8_t *>(out_frame->data[i] + (sws_index * scale_slice_height_ * out_frame->linesize[i] / (i > 0 && is_colour_planes_interleaved_ ? 2 : 1)));
+						out_data[i] = reinterpret_cast<uint8_t *>(out_frame_->data[i] + (sws_index * scale_slice_height_ * out_frame_->linesize[i] / (i > 0 && is_colour_planes_interleaved_ ? 2 : 1)));
 					}
-					sws_scale(sws_.at(sws_index).get(), in_data, in_frame->linesize, 0, scale_slice_height_, out_data, out_frame->linesize);
+					sws_scale(sws_.at(sws_index).get(), in_data, in_frame->linesize, 0, scale_slice_height_, out_data, out_frame_->linesize);
 				});
 
-				out_frame->height = c->height;
-				out_frame->width = c->width;
-				out_frame->format = c->pix_fmt;
-
-				return out_frame;
 			}
 
 			void encode_video_frame(core::read_frame& frame)
 			{
 				AVCodecContext * codec_context = video_st_->codec;
 
-				auto av_frame = convert_video(frame, codec_context);
-				av_frame->interlaced_frame = format_desc_.field_mode != core::field_mode::progressive;
-				av_frame->top_field_first = format_desc_.field_mode == core::field_mode::upper;
-				av_frame->pts = out_frame_number_++;
+				convert_video(frame, codec_context);
+				graph_->set_value("convert-time", convert_timer_.elapsed()*format_desc_.fps*0.5);
+
+				out_frame_->pts = out_frame_number_++;
 
 				AVPacket pkt = { 0 };
 				av_init_packet(&pkt);
 
 				int got_packet;
 
-				THROW_ON_ERROR2(avcodec_encode_video2(codec_context, &pkt, av_frame.get(), &got_packet), "[video_encoder]");
+				THROW_ON_ERROR2(avcodec_encode_video2(codec_context, &pkt, out_frame_.get(), &got_packet), "[video_encoder]");
 
 				if (got_packet == 0)
 					return;
 
 				av_packet_rescale_ts(&pkt, codec_context->time_base, video_st_->time_base);
-				if (codec_context->coded_frame->key_frame)
-					pkt.flags |= AV_PKT_FLAG_KEY;
+
 				pkt.stream_index = video_st_->index;
 				THROW_ON_ERROR2(av_interleaved_write_frame(format_context_.get(), &pkt), "[video_encoder]");
 			}
