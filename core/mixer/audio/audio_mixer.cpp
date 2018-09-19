@@ -68,7 +68,6 @@ struct audio_stream
 
 struct audio_mixer::implementation
 {
-	safe_ptr<diagnostics::graph>		graph_;
 	std::stack<core::frame_transform>	transform_stack_;
 	std::map<const void*, audio_stream>	audio_streams_;
 	std::vector<audio_item>				items_;
@@ -81,14 +80,12 @@ struct audio_mixer::implementation
 	
 public:
 	implementation(const safe_ptr<diagnostics::graph>& graph)
-		: graph_(graph)
-		, format_desc_(video_format_desc::get(video_format::invalid))
+		: format_desc_(video_format_desc::get(video_format::invalid))
 		, channel_layout_(channel_layout::stereo())
 		, master_volume_(1.0f)
 		, previous_master_volume_(master_volume_)
 		, monitor_subject_("/audio")
 	{
-		graph_->set_color("volume", diagnostics::color(1.0f, 0.8f, 0.1f));
 		transform_stack_.push(core::frame_transform());
 	}
 	
@@ -254,20 +251,6 @@ public:
 		
 		// Makes the dBFS of silence => -dynamic range of 32bit LPCM => about -192 dBFS
 		// Otherwise it would be -infinity
-		static const auto MIN_PFS = 0.5f / static_cast<float>(std::numeric_limits<int32_t>::max());
-
-		for (int i = 0; i < num_channels; ++i)
-		{
-			const auto pFS  = max[i] / static_cast<float>(std::numeric_limits<int32_t>::max());
-			const auto dBFS = 20.0f * std::log10(std::max(MIN_PFS, pFS));
-			
-			auto chan_str = boost::lexical_cast<std::string>(i + 1);
-
-			monitor_subject_ << monitor::message("/" + chan_str + "/pFS") % pFS;
-			monitor_subject_ << monitor::message("/" + chan_str + "/dBFS") % dBFS;
-		}
-
-		graph_->set_value("volume", static_cast<double>(*boost::max_element(max)) / std::numeric_limits<int32_t>::max());
 
 		return result;
 	}
